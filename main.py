@@ -6,6 +6,8 @@ from fastapi import HTTPException
 import redis 
 import time
 from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 # Phase 3 where we built a custom token bucket but not being used in present.
 
@@ -67,8 +69,42 @@ lua_script = """
 rate_limiter = redis_client.register_script(lua_script)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI()
+ROUTE_LIMITS = {
+        "/login": (5, 1),
+        "/upload-story": (10, 2),
+}
 
+class RateLimiterMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request:Request, call_next):
+        if request.url.path.rstrip("/") in ["/health/redis", "/redis-test"]:
+            return await call_next(request)
+        user = request.headers.get("user") or request.client.host
+        key = f"rate_limiter:{user}:{request.url.path}"
+        current_time = time.time()
+       
+        capacity, refill = ROUTE_LIMITS.get(request.url.path.rstrip("/"), (5,1))
+
+        try:
+            allowed = rate_limiter(
+                keys = [key],
+                args = [capacity,refill,current_time]
+            )
+        except Exception as e:
+            logging.error(f"Rate limiter error: {str(e)}")
+            return await call_next(request)
+
+        if allowed == 0:
+            logging.warning(f"[RATE_LIMIT] user={user} allowed=0 path={request.url.path}")
+            return JSONResponse(
+                status_code = 429,
+                content = {"detail": "Too many requests"}
+            )
+        logging.info(f"[RATE_LIMIT] user={user} allowed=1 path={request.url.path}")
+        response = await call_next(request)
+        return response
+
+app = FastAPI()
+app.add_middleware(RateLimiterMiddleware)
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -82,13 +118,13 @@ class StoryUploadRequest(BaseModel):
 @app.post("/login", status_code = status.HTTP_200_OK)
 def login(data: LoginRequest):
     user = data.username
-    key = f"rate_limit:{user}"
-    current_time = time.time()
+    # key = f"rate_limit:{user}"
+    # current_time = time.time()
 
-    allowed = rate_limiter(
-        keys = [key],
-        args = [5,1,current_time]
-    )
+    # allowed = rate_limiter(
+    #     keys = [key],
+    #     args = [5,1,current_time]
+    # )
 
     # if user not in storeBucket:
     #     storeBucket[user] = TokenBucket(5,1)
@@ -96,12 +132,13 @@ def login(data: LoginRequest):
     logging.info(f"Login attempt: {data.username}")
 
     # bucket  = storeBucket[user]
-    if not allowed:
-        logging.warning(f"Rate limit exceeded for {user}")
-        raise HTTPException(
-            status_code = 429,
-            detail = "Too many requests"
-        )
+
+    # if not allowed:
+    #     logging.warning(f"Rate limit exceeded for {user}")
+    #     raise HTTPException(
+    #         status_code = 429,
+    #         detail = "Too many requests"
+    #     )
         
     # fastapi reads the JSON body, validates the data, coverts it in python object. (3 stages in one arguemnt entry above)
     return {
