@@ -8,6 +8,7 @@ import time
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
+import json
 
 # Phase 3 where we built a custom token bucket but not being used in present.
 
@@ -182,11 +183,51 @@ def redis_health():
 # The below APIs are not being used currently
 @app.post("/upload-story")
 def upload_story(data: StoryUploadRequest):
+    job = {
+        "id" : str(time.time()),
+        "type" : "upload_story",
+        "title" : data.title,
+        "content" : data.content,
+        "create_at" : time.time()
+    }
+    redis_client.zadd(
+        "job_queue",
+        {
+            json.dumps(job):time.time()
+        }
+    )
+
     return{
         "status": "success",
         "message": "story queued",
         "data": {"story_title": data.title}
     }
+
+@app.get("/jobs")
+def stroy():
+    response = redis_client.zrange("job_queue", 0, -1, withscores=True)
+    return response
+
+@app.post("/delayed-story-upload")
+def delayed_story_upload(data: StoryUploadRequest):
+    execution_time = time.time() + 5
+    job = {
+        "id" : str(time.time()),
+        "type" : "upload_story",
+        "title" : data.title,
+        "content" : data.content,
+        "create_at" : time.time()
+    }
+    redis_client.zadd(
+        "job_queue",
+        {
+            json.dumps(job):execution_time
+        }
+    )
+    return {
+        "status" : "resolved"
+    }
+
 
 @app.get("/metrics/stream") 
 def metrics():
