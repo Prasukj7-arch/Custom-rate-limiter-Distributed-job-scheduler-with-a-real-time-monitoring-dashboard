@@ -73,6 +73,7 @@ def worker():
             # db.execute(
             #     "UPDATE jobs SET status = 'completed', updated_at = NOW() where id=%s", (job_id,)
             # )
+            redis_client.incr("metrics:processed")
             job_obj.status = "completed"
             db.commit()
             
@@ -83,6 +84,7 @@ def worker():
             db.rollback()
 
             job_obj = db.query(Job).filter(Job.id == job_id).first()
+            redis_client.incr("metrics:failed")
 
             job_obj.status = "failed"
             job_obj.retries += 1
