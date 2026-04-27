@@ -18,25 +18,27 @@ def execution(job):
 
 def worker():
     while True:
-        now = time.time()
-        jobs = redis_client.zrangebyscore(
-            JOB_QUEUE,
-            '-inf',
-            now,
-            start=0,
-            num=1
-        )
-        if not jobs:
+        result = redis_client.zpopmin(JOB_QUEUE, count=1)
+
+        if not result:
             time.sleep(1)
             continue
 
-        job_str = jobs[0]
+        job_str,score = result[0]
+        now = time.time()
+
+        if score>now:
+            redis_client.zadd(JOB_QUEUE, {job_str:score})
+            time.sleep(2)
+            continue
+
         job = json.loads(job_str)
-        redis_client.zrem(JOB_QUEUE, job_str)
-
-        execution(job)
-
-
+        
+        try:
+            execution(job)
+        except Exception as e:
+            print(f"there is an errror {str(e)}")
+            redis_client.zadd(JOB_QUEUE, {job_str:time.time()+5})
 
 if __name__ == "__main__":
     print("initialization...")
