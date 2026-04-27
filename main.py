@@ -9,6 +9,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
 import json
+from db import SessionLocal
+from datetime import datetime
 
 # Phase 3 where we built a custom token bucket but not being used in present.
 
@@ -190,6 +192,17 @@ def upload_story(data: StoryUploadRequest):
         "content" : data.content,
         "create_at" : time.time()
     }
+    job_id = job["id"]
+    db = SessionLocal()
+    db.execute(
+        """
+        INSERT INTO jobs(id, type, payload, status, created_at, updated_at) VALUES(%s, %s, %s, %s, NOW(), NOW())
+        """,
+        (job_id, "upload_story", json.dumps(job), "queued")
+    )
+    db.commit()
+    db.close()
+
     redis_client.zadd(
         "job_queue",
         {
@@ -200,7 +213,7 @@ def upload_story(data: StoryUploadRequest):
     return{
         "status": "success",
         "message": "story queued",
-        "data": {"story_title": data.title}
+        "job_id": job_id
     }
 
 @app.get("/jobs")

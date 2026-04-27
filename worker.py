@@ -1,7 +1,7 @@
 import redis
 import time
 import json
-
+from db import SessionLocal
 redis_client=redis.Redis(
     host="localhost",
     port=6379,
@@ -33,12 +33,29 @@ def worker():
             continue
 
         job = json.loads(job_str)
-        
+        job_id = job["id"]
+
+        db = SessionLocal()
         try:
+            db.execute(
+                "UPDATE jobs SET status = 'processing', updated_at = NOW() where id=%s", (job_id,)
+            )
+            db.commit()
             execution(job)
+            db.execute(
+                "UPDATE jobs SET status = 'completed', updated_at = NOW() where id=%s", (job_id,)
+            )
+            db.commit()
+            
         except Exception as e:
-            print(f"there is an errror {str(e)}")
+            db.execute(
+                "UPDATE jobs SET status = 'failed', retries= retries+1, updated_at = NOW() where id=%s", (job_id,)
+            )
+            db.commit()
             redis_client.zadd(JOB_QUEUE, {job_str:time.time()+5})
+
+        finally:
+            db.close()
 
 if __name__ == "__main__":
     print("initialization...")
