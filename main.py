@@ -9,6 +9,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
 import json
+from db import SessionLocal
+from models import Job
 
 # Phase 3 where we built a custom token bucket but not being used in present.
 
@@ -190,6 +192,27 @@ def upload_story(data: StoryUploadRequest):
         "content" : data.content,
         "create_at" : time.time()
     }
+    job_id = job["id"]
+    db = SessionLocal()
+
+    job_obj = Job(
+        id = job_id,
+        type = "upload_story",
+        payload = job,
+        status = "queued"
+    )
+#    " db.execute(
+#         """
+#         INSERT INTO jobs(id, type, payload, status, created_at, updated_at) VALUES(%s, %s, %s, %s, NOW(), NOW())
+#         """,
+#         (job_id, "upload_story", json.dumps(job), "queued")
+#     )"
+    try:
+        db.add(job_obj)
+        db.commit()
+    finally:
+        db.close()
+
     redis_client.zadd(
         "job_queue",
         {
@@ -200,11 +223,11 @@ def upload_story(data: StoryUploadRequest):
     return{
         "status": "success",
         "message": "story queued",
-        "data": {"story_title": data.title}
+        "job_id": job_id
     }
 
 @app.get("/jobs")
-def stroy():
+def story():
     response = redis_client.zrange("job_queue", 0, -1, withscores=True)
     return response
 
@@ -218,6 +241,23 @@ def delayed_story_upload(data: StoryUploadRequest):
         "content" : data.content,
         "create_at" : time.time()
     }
+
+    db = SessionLocal()
+    job_id = job["id"]
+
+    job_obj = Job(
+        id=job_id,
+        type="upload_story",
+        payload=job,
+        status="queued"
+    )
+    try:
+        db.add(job_obj)
+        db.commit()
+
+    finally:
+        db.close()
+
     redis_client.zadd(
         "job_queue",
         {
