@@ -9,6 +9,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
 import json
+from db import SessionLocal
+from models import Job
+from fastapi.responses import StreamingResponse
+import asyncio
+from fastapi.middleware.cors import CORSMiddleware
+
 
 # Phase 3 where we built a custom token bucket but not being used in present.
 
@@ -75,9 +81,16 @@ ROUTE_LIMITS = {
         "/upload-story": (10, 2),
 }
 
+METRICS = {
+    "allowed": "metrics:allowed",
+    "blocked": "metrics:blocked",
+    "processed": "metrics:processed",
+    "failed": "metrics:failed"
+}
+
 class RateLimiterMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request:Request, call_next):
-        if request.url.path.rstrip("/") in ["/health/redis", "/redis-test"]:
+        if request.url.path.rstrip("/") in ["/health/redis", "/redis-test", "/metrics/stream"]:
             return await call_next(request)
         user = request.headers.get("user") or request.client.host
         key = f"rate_limiter:{user}:{request.url.path}"
@@ -96,15 +109,24 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
 
         if allowed == 0:
             logging.warning(f"[RATE_LIMIT] user={user} allowed=0 path={request.url.path}")
+            redis_client.incr("metrics:blocked")
             return JSONResponse(
                 status_code = 429,
                 content = {"detail": "Too many requests"}
             )
         logging.info(f"[RATE_LIMIT] user={user} allowed=1 path={request.url.path}")
+        redis_client.incr("metrics:allowed")
         response = await call_next(request)
         return response
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # for demo (restrict later)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.add_middleware(RateLimiterMiddleware)
 class LoginRequest(BaseModel):
     username: str
@@ -190,6 +212,27 @@ def upload_story(data: StoryUploadRequest):
         "content" : data.content,
         "create_at" : time.time()
     }
+    job_id = job["id"]
+    db = SessionLocal()
+
+    job_obj = Job(
+        id = job_id,
+        type = "upload_story",
+        payload = job,
+        status = "queued"
+    )
+#    " db.execute(
+#         """
+#         INSERT INTO jobs(id, type, payload, status, created_at, updated_at) VALUES(%s, %s, %s, %s, NOW(), NOW())
+#         """,
+#         (job_id, "upload_story", json.dumps(job), "queued")
+#     )"
+    try:
+        db.add(job_obj)
+        db.commit()
+    finally:
+        db.close()
+
     redis_client.zadd(
         "job_queue",
         {
@@ -200,11 +243,11 @@ def upload_story(data: StoryUploadRequest):
     return{
         "status": "success",
         "message": "story queued",
-        "data": {"story_title": data.title}
+        "job_id": job_id
     }
 
 @app.get("/jobs")
-def stroy():
+def story():
     response = redis_client.zrange("job_queue", 0, -1, withscores=True)
     return response
 
@@ -218,6 +261,23 @@ def delayed_story_upload(data: StoryUploadRequest):
         "content" : data.content,
         "create_at" : time.time()
     }
+
+    db = SessionLocal()
+    job_id = job["id"]
+
+    job_obj = Job(
+        id=job_id,
+        type="upload_story",
+        payload=job,
+        status="queued"
+    )
+    try:
+        db.add(job_obj)
+        db.commit()
+
+    finally:
+        db.close()
+
     redis_client.zadd(
         "job_queue",
         {
@@ -229,10 +289,34 @@ def delayed_story_upload(data: StoryUploadRequest):
     }
 
 
-@app.get("/metrics/stream") 
-def metrics():
-    return {
-        "allowed": 10,
-        "blocked": 2,
-        "jobs_processed": 5
-    }
+# @app.get("/metrics/stream") 
+# def metrics():
+#     return {
+#         "allowed": 10,
+#         "blocked": 2,
+#         "jobs_processed": 5
+#     }
+async def event_generator():
+    try:
+        while True:
+            data = {
+                "allowed": int(redis_client.get(METRICS["allowed"]) or 0),
+                "blocked": int(redis_client.get(METRICS["blocked"]) or 0),
+                "processed": int(redis_client.get(METRICS["processed"]) or 0),
+                "failed": int(redis_client.get(METRICS["failed"]) or 0),
+                "queue_depth": redis_client.zcard("job_queue")
+            }
+
+            yield f"data: {json.dumps(data)}\n\n"
+            await asyncio.sleep(2)
+
+    except asyncio.CancelledError:
+        print("SSE connection closed")
+
+
+@app.get("/metrics/stream")
+async def stream_metrics():
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"
+    )
